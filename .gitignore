@@ -163,3 +163,6 @@ kernel_build/*.zip
 kernel_build/*.tar
 kernel_build/*.img.lz4
 kernel_build/FireAsf/*
+
+# KernelSU-Next
+KernelSU-Next
