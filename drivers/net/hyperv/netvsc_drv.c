@@ -2221,11 +2221,7 @@ static int netvsc_vf_join(struct net_device *vf_netdev,
 		goto upper_link_failed;
 	}
 
-	/* If this registration is called from probe context vf_takeover
-	 * is taken care of later in probe itself.
-	 */
-	if (context == VF_REG_IN_NOTIFIER)
-		schedule_delayed_work(&ndev_ctx->vf_takeover, VF_TAKEOVER_INT);
+	schedule_delayed_work(&ndev_ctx->vf_takeover, VF_TAKEOVER_INT);
 
 	call_netdevice_notifiers(NETDEV_JOIN, vf_netdev);
 
@@ -2363,7 +2359,7 @@ static int netvsc_prepare_bonding(struct net_device *vf_netdev)
 	return NOTIFY_DONE;
 }
 
-static int netvsc_register_vf(struct net_device *vf_netdev, int context)
+static int netvsc_register_vf(struct net_device *vf_netdev)
 {
 	struct net_device_context *net_device_ctx;
 	struct netvsc_device *netvsc_dev;

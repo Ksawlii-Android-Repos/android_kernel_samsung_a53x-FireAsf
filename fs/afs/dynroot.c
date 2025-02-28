@@ -131,22 +131,9 @@ static int afs_probe_cell_name(struct dentry *dentry)
 	}
 
 	ret = dns_query(net->net, "afsdb", name, len, "srv=1",
-			&result, NULL, false);
-	if (ret == -ENODATA || ret == -ENOKEY || ret == 0)
+			NULL, NULL, false);
+	if (ret == -ENODATA || ret == -ENOKEY)
 		ret = -ENOENT;
-	if (ret > 0 && ret >= sizeof(struct dns_server_list_v1_header)) {
-		struct dns_server_list_v1_header *v1 = (void *)result;
-
-		if (v1->hdr.zero == 0 &&
-		    v1->hdr.content == DNS_PAYLOAD_IS_SERVER_LIST &&
-		    v1->hdr.version == 1 &&
-		    (v1->status != DNS_LOOKUP_GOOD &&
-		     v1->status != DNS_LOOKUP_GOOD_WITH_BAD))
-			return -ENOENT;
-
-	}
-
-	kfree(result);
 	return ret;
 }
 

@@ -587,7 +587,7 @@ qcaspi_spi_thread(void *data)
 			continue;
 		}
 
-		if (!test_bit(SPI_INTR, &qca->intr) &&
+		if ((qca->intr_req == qca->intr_svc) &&
 		    !qca->txr.skb[qca->txr.head])
 			schedule();
 
