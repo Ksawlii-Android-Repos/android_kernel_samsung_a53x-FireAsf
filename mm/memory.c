@@ -57,6 +57,7 @@
 #include <linux/delayacct.h>
 #include <linux/init.h>
 #include <linux/pfn_t.h>
+#include <linux/pgsize_migration.h>
 #include <linux/writeback.h>
 #include <linux/memcontrol.h>
 #include <linux/mmu_notifier.h>
@@ -83,6 +84,10 @@
 #include <linux/uaccess.h>
 #include <asm/tlb.h>
 #include <asm/tlbflush.h>
+
+#ifdef CONFIG_PAGE_BOOST_RECORDING
+#include <linux/io_record.h>
+#endif
 
 #include "pgalloc-track.h"
 #include "internal.h"
@@ -3588,8 +3593,8 @@ void unmap_mapping_pages(struct address_space *mapping, pgoff_t start,
 void unmap_mapping_range(struct address_space *mapping,
 		loff_t const holebegin, loff_t const holelen, int even_cows)
 {
-	pgoff_t hba = holebegin >> PAGE_SHIFT;
-	pgoff_t hlen = (holelen + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	pgoff_t hba = (pgoff_t)(holebegin) >> PAGE_SHIFT;
+	pgoff_t hlen = ((pgoff_t)(holelen) + PAGE_SIZE - 1) >> PAGE_SHIFT;
 
 	/* Check for overflow. */
 	if (sizeof(holelen) > sizeof(hlen)) {
@@ -4252,7 +4257,7 @@ vm_fault_t finish_fault(struct vm_fault *vmf)
 			spin_unlock(vmf->ptl);
 		} else if (unlikely(pte_alloc(vma->vm_mm, vmf->pmd))) {
 			return VM_FAULT_OOM;
-		}
+	}
 	}
 
 	/*
@@ -4278,8 +4283,13 @@ skip_pmd_checks:
 	return ret;
 }
 
+#ifdef CONFIG_FAULT_AROUND_4KB
+static unsigned long fault_around_bytes __read_mostly =
+	rounddown_pow_of_two(4096);
+#else
 static unsigned long fault_around_bytes __read_mostly =
 	rounddown_pow_of_two(65536);
+#endif
 
 #ifdef CONFIG_DEBUG_FS
 static int fault_around_bytes_get(void *data, u64 *val)
@@ -4359,7 +4369,7 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 	end_pgoff = start_pgoff -
 		((address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1)) +
 		PTRS_PER_PTE - 1;
-	end_pgoff = min3(end_pgoff, vma_pages(vmf->vma) + vmf->vma->vm_pgoff - 1,
+	end_pgoff = min3(end_pgoff, vma_data_pages(vmf->vma) + vmf->vma->vm_pgoff - 1,
 			start_pgoff + nr_pages - 1);
 
 	if (!(vmf->flags & FAULT_FLAG_SPECULATIVE) &&
@@ -4391,6 +4401,10 @@ static vm_fault_t do_read_fault(struct vm_fault *vmf)
 			if (ret)
 				return ret;
 		}
+#ifdef CONFIG_PAGE_BOOST_RECORDING
+	} else if (vma->vm_ops->map_pages && fault_around_bytes >> PAGE_SHIFT == 1) {
+		record_io_info(vma->vm_file, vmf->pgoff, 1);
+#endif
 	}
 
 	ret = __do_fault(vmf);
@@ -5057,6 +5071,7 @@ static vm_fault_t ___handle_speculative_fault(struct mm_struct *mm,
 
 	vmf.vma_flags = READ_ONCE(vmf.vma->vm_flags);
 	vmf.vma_page_prot = READ_ONCE(vmf.vma->vm_page_prot);
+	vmf.sequence = seq;
 
 #ifdef CONFIG_USERFAULTFD
 	/*
@@ -5066,7 +5081,7 @@ static vm_fault_t ___handle_speculative_fault(struct mm_struct *mm,
 	if (unlikely(vmf.vma_flags & __VM_UFFD_FLAGS)) {
 		uffd_missing_sigbus = vma_is_anonymous(vmf.vma) &&
 					(vmf.vma_flags & VM_UFFD_MISSING) &&
-					userfaultfd_using_sigbus(vmf.vma);
+					userfaultfd_using_sigbus(&vmf);
 		if (!uffd_missing_sigbus) {
 			trace_spf_vma_notsup(_RET_IP_, vmf.vma, address);
 			return VM_FAULT_RETRY;
@@ -5192,7 +5207,6 @@ static vm_fault_t ___handle_speculative_fault(struct mm_struct *mm,
 		vmf.pte = NULL;
 	}
 
-	vmf.sequence = seq;
 	vmf.flags = flags;
 
 	local_irq_enable();
@@ -5559,6 +5573,10 @@ int follow_phys(struct vm_area_struct *vma,
 	if (follow_pte(vma->vm_mm, address, &ptep, &ptl))
 		goto out;
 	pte = *ptep;
+
+	/* Never return PFNs of anon folios in COW mappings. */
+	if (vm_normal_page(vma, address, pte))
+		goto unlock;
 
 	if ((flags & FOLL_WRITE) && !pte_write(pte))
 		goto unlock;
