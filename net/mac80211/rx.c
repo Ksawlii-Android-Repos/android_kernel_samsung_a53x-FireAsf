@@ -17,6 +17,7 @@
 #include <linux/etherdevice.h>
 #include <linux/rcupdate.h>
 #include <linux/export.h>
+#include <linux/kcov.h>
 #include <linux/bitops.h>
 #include <net/mac80211.h>
 #include <net/ieee80211_radiotap.h>
@@ -2128,7 +2129,7 @@ ieee80211_rx_h_decrypt(struct ieee80211_rx_data *rx)
 	status->flag |= RX_FLAG_DECRYPTED;
 
 	if (unlikely(ieee80211_is_beacon(fc) && result == RX_DROP_UNUSABLE &&
-		     rx->sdata->dev))
+			 rx->sdata->dev))
 		cfg80211_rx_unprot_mlme_mgmt(rx->sdata->dev,
 					     skb->data, skb->len);
 
