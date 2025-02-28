@@ -353,8 +353,11 @@ retry:
 	} else if (fuse_stale_inode(inode, generation, attr)) {
 		/* nodeid was reused, any I/O on the old inode should fail */
 		fuse_make_bad(inode);
-		iput(inode);
-		goto retry;
+		if (inode != d_inode(sb->s_root)) {
+			remove_inode_hash(inode);
+			iput(inode);
+			goto retry;
+		}
 	}
 done:
 	fi = get_fuse_inode(inode);
@@ -1094,6 +1097,8 @@ static void process_init_reply(struct fuse_mount *fm, struct fuse_args *args,
 		fc->conn_error = 1;
 	}
 
+	ST_LOG("<%s> dev = %u:%u  fuse Initialized",
+			__func__, MAJOR(fc->dev), MINOR(fc->dev));
 	fuse_set_initialized(fc);
 	wake_up_all(&fc->blocked_waitq);
 }
@@ -1139,6 +1144,9 @@ void fuse_send_init(struct fuse_mount *fm)
 	ia->args.force = true;
 	ia->args.nocreds = true;
 	ia->args.end = process_init_reply;
+
+	ST_LOG("<%s> dev = %u:%u  fuse send Initrequest",
+			__func__, MAJOR(fm->fc->dev), MINOR(fm->fc->dev));
 
 	if (fuse_simple_background(fm, &ia->args, GFP_KERNEL) != 0)
 		process_init_reply(fm, &ia->args, -ENOTCONN);
