@@ -3937,22 +3937,6 @@ static inline unsigned long task_util_est(struct task_struct *p)
 	return max(task_util(p), _task_util_est(p));
 }
 
-#ifdef CONFIG_UCLAMP_TASK
-static inline unsigned long uclamp_task_util(struct task_struct *p,
-					     unsigned long uclamp_min,
-					     unsigned long uclamp_max)
-{
-	return clamp(task_util_est(p), uclamp_min, uclamp_max);
-}
-#else
-static inline unsigned long uclamp_task_util(struct task_struct *p,
-					     unsigned long uclamp_min,
-					     unsigned long uclamp_max)
-{
-	return task_util_est(p);
-}
-#endif
-
 static inline void util_est_enqueue(struct cfs_rq *cfs_rq,
 				    struct task_struct *p)
 {
@@ -6901,7 +6885,7 @@ static int find_energy_efficient_cpu(struct task_struct *p, int prev_cpu, int sy
 	if (!sd)
 		goto fail;
 
-	if (!uclamp_task_util(p, p_util_min, p_util_max))
+	if (!task_util_est(p) && p_util_min == 0)
 		goto unlock;
 
 	latency_sensitive = uclamp_latency_sensitive(p);
@@ -11827,3 +11811,27 @@ int sched_trace_rq_nr_running(struct rq *rq)
         return rq ? rq->nr_running : -1;
 }
 EXPORT_SYMBOL_GPL(sched_trace_rq_nr_running);
+
+int sched_check_cfs_rq_32bit(int cpu)
+{
+#ifdef CONFIG_SMP
+	struct rq *rq = cpu_rq(cpu);
+	struct list_head *tasks = &rq->cfs_tasks;
+	struct task_struct *p;
+	unsigned long flags;
+
+	raw_spin_lock_irqsave(&rq->lock, flags);
+	list_for_each_entry(p, tasks, se.group_node) {
+		if (task_cpu_possible_mask(p) != cpu_possible_mask) {
+			raw_spin_unlock_irqrestore(&rq->lock, flags);
+			return 1;
+		}
+	}
+
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
+
+	return 0;
+#else
+	return 0;
+#endif
+}
