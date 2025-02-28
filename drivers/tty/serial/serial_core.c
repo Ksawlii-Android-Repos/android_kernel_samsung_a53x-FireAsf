@@ -192,7 +192,7 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 	 * Initialise and allocate the transmit and temporary
 	 * buffer.
 	 */
-	page = get_zeroed_page(GFP_KERNEL);
+	page = __get_free_pages(GFP_KERNEL|__GFP_ZERO|__GFP_COMP, 2);
 	if (!page)
 		return -ENOMEM;
 
@@ -207,7 +207,7 @@ static int uart_port_startup(struct tty_struct *tty, struct uart_state *state,
 		 * Do not free() the page under the port lock, see
 		 * uart_shutdown().
 		 */
-		free_page(page);
+		free_pages(page, 2);
 	}
 
 	retval = uport->ops->startup(uport);
@@ -310,7 +310,7 @@ static void uart_shutdown(struct tty_struct *tty, struct uart_state *state)
 	uart_port_unlock(uport, flags);
 
 	if (xmit_buf)
-		free_page((unsigned long)xmit_buf);
+		free_pages((unsigned long)xmit_buf, 2);
 }
 
 /**
@@ -2419,13 +2419,22 @@ uart_configure_port(struct uart_driver *drv, struct uart_state *state,
 			port->type = PORT_UNKNOWN;
 			flags |= UART_CONFIG_TYPE;
 		}
+		/* Synchronize with possible boot console. */
+		if (uart_console(port))
+			console_lock();
 		port->ops->config_port(port, flags);
+		if (uart_console(port))
+			console_unlock();
 	}
 
 	if (port->type != PORT_UNKNOWN) {
 		unsigned long flags;
 
 		uart_report_port(drv, port);
+
+		/* Synchronize with possible boot console. */
+		if (uart_console(port))
+			console_lock();
 
 		/* Power up port for set_mctrl() */
 		uart_change_pm(state, UART_PM_STATE_ON);
@@ -2442,6 +2451,9 @@ uart_configure_port(struct uart_driver *drv, struct uart_state *state,
 		else
 			port->rs485_config(port, &port->rs485);
 		spin_unlock_irqrestore(&port->lock, flags);
+
+		if (uart_console(port))
+			console_unlock();
 
 		/*
 		 * If this driver supports console, and it hasn't been
