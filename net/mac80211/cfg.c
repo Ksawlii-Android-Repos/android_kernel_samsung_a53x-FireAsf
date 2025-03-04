@@ -509,6 +509,9 @@ static int ieee80211_add_key(struct wiphy *wiphy, struct net_device *dev,
 		sta->cipher_scheme = cs;
 
 	err = ieee80211_key_link(key, sdata, sta);
+	/* KRACK protection, shouldn't happen but just silently accept key */
+	if (err == -EALREADY)
+		err = 0;
 
  out_unlock:
 	mutex_unlock(&local->sta_mtx);
@@ -2717,7 +2720,8 @@ static int ieee80211_get_tx_power(struct wiphy *wiphy,
 	struct ieee80211_local *local = wiphy_priv(wiphy);
 	struct ieee80211_sub_if_data *sdata = IEEE80211_WDEV_TO_SUB_IF(wdev);
 
-	if (local->ops->get_txpower)
+	if (local->ops->get_txpower &&
+	    (sdata->flags & IEEE80211_SDATA_IN_DRIVER))
 		return drv_get_txpower(local, sdata, dbm);
 
 	if (!local->use_chanctx)
@@ -4104,17 +4108,6 @@ static int ieee80211_reset_tid_config(struct wiphy *wiphy,
 	return ret;
 }
 
-static int ieee80211_set_sar_specs(struct wiphy *wiphy,
-				   struct cfg80211_sar_specs *sar)
-{
-	struct ieee80211_local *local = wiphy_priv(wiphy);
-
-	if (!local->ops->set_sar_specs)
-		return -EOPNOTSUPP;
-
-	return local->ops->set_sar_specs(&local->hw, sar);
-}
-
 const struct cfg80211_ops mac80211_config_ops = {
 	.add_virtual_intf = ieee80211_add_iface,
 	.del_virtual_intf = ieee80211_del_iface,
@@ -4218,5 +4211,4 @@ const struct cfg80211_ops mac80211_config_ops = {
 	.probe_mesh_link = ieee80211_probe_mesh_link,
 	.set_tid_config = ieee80211_set_tid_config,
 	.reset_tid_config = ieee80211_reset_tid_config,
-	.set_sar_specs = ieee80211_set_sar_specs,
 };

@@ -1021,7 +1021,6 @@ void dpm_resume(pm_message_t state)
 	while (!list_empty(&dpm_suspended_list)) {
 		dev = to_device(dpm_suspended_list.next);
 
-		secdbg_base_built_set_suspend_device(__func__, dev_name(dev));
 		get_device(dev);
 
 		mutex_unlock(&dpm_list_mtx);

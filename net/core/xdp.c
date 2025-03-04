@@ -129,6 +129,7 @@ void xdp_unreg_mem_model(struct xdp_mem_info *mem)
 		page_pool_destroy(xa->page_pool);
 		rcu_read_unlock();
 	}
+
 }
 EXPORT_SYMBOL_GPL(xdp_unreg_mem_model);
 
