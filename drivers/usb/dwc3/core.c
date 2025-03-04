@@ -294,13 +294,8 @@ int dwc3_core_soft_reset(struct dwc3 *dwc)
 	int		retries = 1000;
 	int		i;
 
-	/*
-	 * We're resetting only the device side because, if we're in host mode,
-	 * XHCI driver will reset the host block. If dwc3 was configured for
-	 * host-only mode, then we can return early.
-	 */
-	if (dwc->current_dr_role == DWC3_GCTL_PRTCAP_HOST)
-		return 0;
+	for (i = 0; i < 3; i++) {
+		pr_info("%s +++\n", __func__);
 
 		/*
 		 * We're resetting only the device side because, if we're in host mode,
@@ -1691,6 +1686,7 @@ static int dwc3_probe(struct platform_device *pdev)
 	pm_runtime_put(dev);
 
 	dma_set_max_seg_size(dev, UINT_MAX);
+	pr_info("%s ---\n", __func__);
 
 	return 0;
 
@@ -1792,6 +1788,7 @@ assert_reset:
 
 static int dwc3_suspend_common(struct dwc3 *dwc, pm_message_t msg)
 {
+	unsigned long flags;
 	u32 reg;
 
 	switch (dwc->current_dr_role) {
@@ -1848,6 +1845,7 @@ static int dwc3_suspend_common(struct dwc3 *dwc, pm_message_t msg)
 
 static int dwc3_resume_common(struct dwc3 *dwc, pm_message_t msg)
 {
+	unsigned long	flags;
 	int		ret;
 	u32		reg;
 

@@ -379,14 +379,13 @@ static void exynos_ufs_dev_hw_reset(struct ufs_hba *hba)
 	hci_writel(&ufs->handle, 1 << 0, HCI_GPIO_OUT);
 }
 
-static void exynos_ufs_pre_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
+static void exynos_ufs_config_host(struct exynos_ufs *ufs)
 {
 	u32 reg;
 
-	if (cmd == UIC_CMD_DME_HIBER_EXIT) {
-		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
-			exynos_ufs_disable_auto_ctrl_hcc(ufs);
-		exynos_ufs_ungate_clks(ufs);
+	/* internal clock control */
+	exynos_ufs_ctrl_auto_hci_clk(ufs, false);
+	exynos_ufs_set_unipro_mclk(ufs);
 
 	/* period for interrupt aggregation */
 	exynos_ufs_fit_aggr_timeout(ufs);
@@ -506,14 +505,16 @@ static void exynos_ufs_set_features(struct ufs_hba *hba)
 	}
 }
 
-static void exynos_ufs_post_hibern8(struct ufs_hba *hba, enum uic_cmd_dme cmd)
+/*
+ * Exynos-specific callback functions
+ */
+static int exynos_ufs_init(struct ufs_hba *hba)
 {
 	struct exynos_ufs *ufs = to_exynos_ufs(hba);
 	int ret;
 
-	if (cmd == UIC_CMD_DME_HIBER_EXIT) {
-		u32 cur_mode = 0;
-		u32 pwrmode;
+	/* refer to hba */
+	ufs->hba = hba;
 
 	/* configure externals */
 	ret = exynos_ufs_config_externals(ufs);
@@ -563,13 +564,202 @@ static int exynos_ufs_wait_for_register(struct ufs_vs_handle *handle, u32 reg, u
 		}
 	}
 
-		if (!(ufs->opts & EXYNOS_UFS_OPT_SKIP_CONNECTION_ESTAB))
-			exynos_ufs_establish_connt(ufs);
-	} else if (cmd == UIC_CMD_DME_HIBER_ENTER) {
-		ufs->entry_hibern8_t = ktime_get();
-		exynos_ufs_gate_clks(ufs);
-		if (ufs->opts & EXYNOS_UFS_OPT_BROKEN_AUTO_CLK_CTRL)
-			exynos_ufs_enable_auto_ctrl_hcc(ufs);
+	return err;
+}
+
+/* This is same code with ufshcd_clear_cmd() */
+static int exynos_ufs_clear_cmd(struct ufs_hba *hba, int tag)
+{
+	struct exynos_ufs *ufs = to_exynos_ufs(hba);
+	struct ufs_vs_handle *handle = &ufs->handle;
+	int err = 0;
+	u32 mask = 1 << tag;
+
+	/* clear outstanding transaction before retry */
+	if (hba->quirks & UFSHCI_QUIRK_BROKEN_REQ_LIST_CLR)
+		std_writel(handle, (1 << tag), REG_UTP_TRANSFER_REQ_LIST_CLEAR);
+	else
+		std_writel(handle, ~(1 << tag),
+				REG_UTP_TRANSFER_REQ_LIST_CLEAR);
+
+	/*
+	 * wait for for h/w to clear corresponding bit in door-bell.
+	 * max. wait is 1 sec.
+	 */
+	err = exynos_ufs_wait_for_register(handle,
+			REG_UTP_TRANSFER_REQ_DOOR_BELL,
+			mask, ~mask, 1000, 1000);
+
+	if (!err && (hba->ufs_version >= ufshci_version(3, 0)))
+		std_writel(handle, 1UL << tag, REG_UTP_TRANSFER_REQ_LIST_COMPL);
+
+	return err;
+}
+
+static void __requeue_after_reset(struct ufs_hba *hba, bool reset)
+{
+	struct ufshcd_lrb *lrbp;
+	struct scsi_cmnd *cmd;
+	unsigned long completed_reqs = hba->outstanding_reqs;
+	int index, err = 0;
+
+	pr_err("%s: outstanding reqs=0x%lx\n", __func__, hba->outstanding_reqs);
+	for_each_set_bit(index, &completed_reqs, hba->nutrs) {
+		lrbp = &hba->lrb[index];
+		lrbp->compl_time_stamp = ktime_get();
+		cmd = lrbp->cmd;
+		if (!cmd)
+			continue;
+		if (!test_and_clear_bit(index, &hba->outstanding_reqs))
+			continue;
+
+		if (!reset) {
+			err = exynos_ufs_clear_cmd(hba, index);
+			if (err)
+				pr_err("%s: Failed to clear tag = %d\n",
+						__func__, index);
+		}
+		trace_android_vh_ufs_compl_command(hba, lrbp);
+		scsi_dma_unmap(cmd);
+		if (cmd->cmnd[0] == START_STOP) {
+			set_driver_byte(cmd, SAM_STAT_TASK_ABORTED);
+			set_host_byte(cmd, DID_ABORT);
+			pr_err("%s: tag %d, cmd %02x aborted\n", __func__,
+					index, cmd->cmnd[0]);
+		} else {
+			set_host_byte(cmd, DID_REQUEUE);
+			pr_err("%s: tag %d, cmd %02x requeued\n", __func__,
+					index, cmd->cmnd[0]);
+		}
+		ufshcd_crypto_clear_prdt(hba, lrbp);
+		lrbp->cmd = NULL;
+		ufshcd_release(hba);
+		cmd->scsi_done(cmd);
+	}
+
+	pr_info("%s: clk_gating.active_reqs: %d\n", __func__, hba->clk_gating.active_reqs);
+}
+
+static void exynos_ufs_init_host(struct ufs_hba *hba)
+{
+	struct exynos_ufs *ufs = to_exynos_ufs(hba);
+	unsigned long timeout = jiffies + msecs_to_jiffies(1);
+	int err = 0;
+	u32 reg;
+
+	/* host reset */
+	hci_writel(&ufs->handle, UFS_SW_RST_MASK, HCI_SW_RST);
+
+	do {
+		if (!(hci_readl(&ufs->handle, HCI_SW_RST) & UFS_SW_RST_MASK))
+			goto success;
+	} while (time_before(jiffies, timeout));
+
+	dev_err(ufs->dev, "timeout host sw-reset\n");
+	err = -ETIMEDOUT;
+
+	exynos_ufs_dump_info(hba, &ufs->handle, ufs->dev);
+	exynos_ufs_fmp_dump_info(hba);
+#if !IS_ENABLED(CONFIG_SAMSUNG_PRODUCT_SHIP)
+#ifndef CONFIG_SCSI_UFS_EXYNOS_BLOCK_WDT_RST
+	dbg_snapshot_expire_watchdog();
+#endif
+#endif
+	goto out;
+
+success:
+	/* report to IS.UE reg when UIC error happens during AH8 */
+	if (ufshcd_is_auto_hibern8_supported(hba)) {
+		reg = hci_readl(&ufs->handle, HCI_VENDOR_SPECIFIC_IE);
+		hci_writel(&ufs->handle, (reg | AH8_ERR_REPORT_UE), HCI_VENDOR_SPECIFIC_IE);
+	}
+
+	/* performance */
+	if (ufs->perf)
+		ufs_perf_reset(ufs->perf);
+
+	/* configure host */
+	exynos_ufs_config_host(ufs);
+	exynos_ufs_fmp_set_crypto_cfg(hba);
+
+	__requeue_after_reset(hba, true);
+
+
+	ufs->suspend_done = false;
+out:
+	if (!err)
+		ufs_sec_check_device_stuck();
+	return;
+}
+
+static void hibern8_enter_stat(struct exynos_ufs *ufs)
+{
+	u32 upmcrs;
+
+	/*
+	 * hibern8 enter results are comprised of upmcrs and uic result,
+	 * but you may not get the uic result because an interrupt
+	 * for ah8 error is raised and ISR handles this before this is called.
+	 * Honestly, upmcrs may also be the same case because UFS driver
+	 * considers ah8 error as fatal and host reset is asserted subsequently.
+	 * So you don't trust this return value.
+	 */
+	upmcrs = __get_upmcrs(ufs);
+	trace_ufshcd_profile_hibern8(dev_name(ufs->dev), "enter", 0, upmcrs);
+	ufs->hibern8_enter_cnt++;
+	ufs->hibern8_state = UFS_STATE_AH8;
+}
+
+static void hibern8_exit_stat(struct exynos_ufs *ufs)
+{
+
+	/*
+	 * this is called before actual hibern8 exit,
+	 * so return value is meaningless
+	 */
+	trace_ufshcd_profile_hibern8(dev_name(ufs->dev), "exit", 0, 0);
+	ufs->hibern8_exit_cnt++;
+	ufs->hibern8_state = UFS_STATE_IDLE;
+}
+
+static int exynos_ufs_setup_clocks(struct ufs_hba *hba, bool on,
+					enum ufs_notify_change_status notify)
+{
+	struct exynos_ufs *ufs = to_exynos_ufs(hba);
+	int ret = 0;
+
+	if (on) {
+		if (notify == PRE_CHANGE) {
+			/* Clear for SICD */
+#if IS_ENABLED(CONFIG_EXYNOS_CPUPM)
+			exynos_update_ip_idle_status(ufs->idle_ip_index, 0);
+#endif
+			/* PM Qos hold for stability */
+#if IS_ENABLED(CONFIG_EXYNOS_PM_QOS) || IS_ENABLED(CONFIG_EXYNOS_PM_QOS_MODULE)
+			exynos_pm_qos_update_request(&ufs->pm_qos_int, ufs->pm_qos_int_value);
+#endif
+		} else {
+			hibern8_exit_stat(ufs);
+			ufs->c_state = C_ON;
+		}
+	} else {
+		if (notify == PRE_CHANGE) {
+			ufs->c_state = C_OFF;
+			hibern8_enter_stat(ufs);
+
+			/* reset perf context to start again */
+			if (ufs->perf)
+				ufs_perf_reset(ufs->perf);
+		} else {
+			/* PM Qos Release for stability */
+#if IS_ENABLED(CONFIG_EXYNOS_PM_QOS) || IS_ENABLED(CONFIG_EXYNOS_PM_QOS_MODULE)
+			exynos_pm_qos_update_request(&ufs->pm_qos_int, 0);
+#endif
+			/* Set for SICD */
+#if IS_ENABLED(CONFIG_EXYNOS_CPUPM)
+			exynos_update_ip_idle_status(ufs->idle_ip_index, 1);
+#endif
+		}
 	}
 
 	return ret;
@@ -766,17 +956,145 @@ static int exynos_ufs_pwr_change_notify(struct ufs_hba *hba,
 	return ret;
 }
 
-static void exynos_ufs_hibern8_notify(struct ufs_hba *hba,
-				     enum uic_cmd_dme cmd,
-				     enum ufs_notify_change_status notify)
+/*
+ * Translating a bit-wise variable to a count essentially requires
+ * requires an iteration that sometimes lead to a big cost.
+ * This function remove the iteration and reduce time complexbility
+ * up to O(1). Now, even if the doorbell becomes biggers,
+ * there will be no change of time.
+ */
+static u32 __ufs_cal_set_bits(u32 reqs)
 {
-	switch ((u8)notify) {
-	case PRE_CHANGE:
-		exynos_ufs_pre_hibern8(hba, cmd);
-		break;
-	case POST_CHANGE:
-		exynos_ufs_post_hibern8(hba, cmd);
-		break;
+	/* Hamming Weight Algorithm */
+	reqs = reqs - ((reqs >> 1) & 0x55555555);
+	reqs = (reqs & 0x33333333) + ((reqs >> 2) & 0x33333333);
+	reqs = (reqs + (reqs >> 4)) & 0x0F0F0F0F;
+	return (reqs * 0x01010101) >> 24;
+}
+
+static void exynos_ufs_set_nexus_t_xfer_req(struct ufs_hba *hba,
+				int tag, bool cmd)
+{
+	struct exynos_ufs *ufs = to_exynos_ufs(hba);
+	enum ufs_perf_op op = UFS_PERF_OP_NONE;
+	struct ufshcd_lrb *lrbp;
+	struct scsi_cmnd *scmd;
+	struct ufs_vs_handle *handle = &ufs->handle;
+	u32 qd;
+	/*
+	 * Wait up to 50us, seen as safe value for nexus configuration.
+	 * Accessing HCI_UTRL_NEXUS_TYPE takes hundreds of nanoseconds
+	 * given w/ simulation but we don't know when the previous access
+	 * will finish. To reduce its polling latency, we use 10ns.
+	 */
+	int timeout_cnt = 50000 / 10;
+	int wait_ns = 10;
+
+	if (!IS_C_STATE_ON(ufs) ||
+			(ufs->h_state != H_LINK_UP &&
+			ufs->h_state != H_LINK_BOOST &&
+			ufs->h_state != H_REQ_BUSY))
+		PRINT_STATES(ufs);
+
+	/* perf */
+	lrbp = &hba->lrb[tag];
+	if (lrbp && lrbp->cmd) {
+		scmd = lrbp->cmd;
+
+		/* performance, only for SCSI */
+		if (scmd->cmnd[0] == 0x28)
+			op = UFS_PERF_OP_R;
+		else if (scmd->cmnd[0] == 0x2A)
+			op = UFS_PERF_OP_W;
+		else if (scmd->cmnd[0] == 0x35)
+			op = UFS_PERF_OP_S;
+		if (ufs->perf) {
+			qd = __ufs_cal_set_bits(hba->outstanding_reqs);
+			ufs_perf_update(ufs->perf, qd, scmd, op);
+		}
+
+		/* cmd_logging */
+		exynos_ufs_cmd_log_start(handle, hba, scmd);
+	}
+
+	/* check if an update is needed */
+	while (test_and_set_bit(EXYNOS_UFS_BIT_CHK_NEXUS, &ufs->flag)
+	       && timeout_cnt--)
+		ndelay(wait_ns);
+
+	if (cmd) {
+		if (test_and_set_bit(tag, &ufs->nexus))
+			goto out;
+	} else {
+		if (!test_and_clear_bit(tag, &ufs->nexus))
+			goto out;
+	}
+	hci_writel(&ufs->handle, (u32)ufs->nexus, HCI_UTRL_NEXUS_TYPE);
+out:
+	clear_bit(EXYNOS_UFS_BIT_CHK_NEXUS, &ufs->flag);
+	ufs->h_state = H_REQ_BUSY;
+}
+
+static void exynos_ufs_check_uac(struct ufs_hba *hba, int tag, bool cmd)
+{
+	struct exynos_ufs *ufs = to_exynos_ufs(hba);
+	struct ufshcd_lrb *lrbp;
+	struct scsi_cmnd *scmd;
+	struct utp_upiu_rsp *ucd_rsp_ptr;
+	int result = 0;
+
+	if (!cmd)
+		return;
+
+	lrbp = &hba->lrb[tag];
+	ucd_rsp_ptr = lrbp->ucd_rsp_ptr;
+	scmd = lrbp->cmd;
+
+	result = be32_to_cpu(ucd_rsp_ptr->header.dword_0) >> 24;
+	if (result != UPIU_TRANSACTION_RESPONSE)
+		return;
+
+	result = be32_to_cpu(ucd_rsp_ptr->header.dword_1);
+	if (result & SAM_STAT_CHECK_CONDITION) {
+		result &= ~SAM_STAT_CHECK_CONDITION;
+		result |= SAM_STAT_BUSY;
+		ucd_rsp_ptr->header.dword_1 = cpu_to_be32(result);
+
+		scmd->result |= (DID_SOFT_ERROR << 16);
+	}
+
+	ufs->resume_state = 0;
+}
+
+static void exynos_ufs_compl_nexus_t_xfer_req(void *data, struct ufs_hba *hba,
+				struct ufshcd_lrb *lrbp)
+{
+	struct exynos_ufs *ufs = to_exynos_ufs(hba);
+	struct ufs_vs_handle *handle = &ufs->handle;
+	unsigned long completed_reqs;
+	u32 tr_doorbell;
+	int tag;
+
+	if (!lrbp) {
+		dev_err(hba->dev, "%s: lrbp: local reference block is null\n", __func__);
+		return;
+	}
+
+	tag = lrbp->task_tag;
+
+	/* When it's first command completion after resume, check uac. */
+	if (ufs->resume_state || (lrbp->lun != 0))
+		exynos_ufs_check_uac(hba, tag, (lrbp->cmd ? true : false));
+
+	/* cmd_logging */
+	if (lrbp->cmd)
+		exynos_ufs_cmd_log_end(handle, hba, tag);
+
+	tr_doorbell = std_readl(handle, REG_UTP_TRANSFER_REQ_DOOR_BELL);
+	completed_reqs = tr_doorbell ^ hba->outstanding_reqs;
+	if (!(hba->outstanding_reqs^completed_reqs)) {
+		if (ufs->perf)
+			ufs_perf_reset(ufs->perf);
 	}
 }
 
