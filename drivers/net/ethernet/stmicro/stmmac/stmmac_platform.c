@@ -395,7 +395,7 @@ static int stmmac_of_get_mac_mode(struct device_node *np)
  * set some private fields that will be used by the main at runtime.
  */
 struct plat_stmmacenet_data *
-stmmac_probe_config_dt(struct platform_device *pdev, u8 *mac)
+stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
 {
 	struct device_node *np = pdev->dev.of_node;
 	struct plat_stmmacenet_data *plat;
@@ -407,12 +407,12 @@ stmmac_probe_config_dt(struct platform_device *pdev, u8 *mac)
 	if (!plat)
 		return ERR_PTR(-ENOMEM);
 
-	rc = of_get_mac_address(np, mac);
-	if (rc) {
-		if (rc == -EPROBE_DEFER)
-			return ERR_PTR(rc);
+	*mac = of_get_mac_address(np);
+	if (IS_ERR(*mac)) {
+		if (PTR_ERR(*mac) == -EPROBE_DEFER)
+			return ERR_CAST(*mac);
 
-		eth_zero_addr(mac);
+		*mac = NULL;
 	}
 
 	phy_mode = device_get_phy_mode(&pdev->dev);
@@ -643,7 +643,7 @@ void stmmac_remove_config_dt(struct platform_device *pdev,
 }
 #else
 struct plat_stmmacenet_data *
-stmmac_probe_config_dt(struct platform_device *pdev, u8 *mac)
+stmmac_probe_config_dt(struct platform_device *pdev, const char **mac)
 {
 	return ERR_PTR(-EINVAL);
 }

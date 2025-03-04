@@ -208,7 +208,7 @@ struct dsa_port {
 	unsigned int		index;
 	const char		*name;
 	struct dsa_port		*cpu_dp;
-	u8			mac[ETH_ALEN];
+	const char		*mac;
 	struct device_node	*dn;
 	unsigned int		ageing_time;
 	bool			vlan_filtering;

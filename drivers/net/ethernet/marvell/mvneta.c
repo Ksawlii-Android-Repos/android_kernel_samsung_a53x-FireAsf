@@ -5062,6 +5062,7 @@ static int mvneta_probe(struct platform_device *pdev)
 	struct net_device *dev;
 	struct phylink *phylink;
 	struct phy *comphy;
+	const char *dt_mac_addr;
 	char hw_mac_addr[ETH_ALEN];
 	phy_interface_t phy_mode;
 	const char *mac_from;
@@ -5157,9 +5158,10 @@ static int mvneta_probe(struct platform_device *pdev)
 		goto err_free_ports;
 	}
 
-	err = of_get_mac_address(dn, dev->dev_addr);
-	if (!err) {
+	dt_mac_addr = of_get_mac_address(dn);
+	if (!IS_ERR(dt_mac_addr)) {
 		mac_from = "device tree";
+		ether_addr_copy(dev->dev_addr, dt_mac_addr);
 	} else {
 		mvneta_get_mac_addr(pp, hw_mac_addr);
 		if (is_valid_ether_addr(hw_mac_addr)) {

@@ -1686,7 +1686,6 @@ static void fec_get_mac(struct net_device *ndev)
 	struct fec_enet_private *fep = netdev_priv(ndev);
 	struct fec_platform_data *pdata = dev_get_platdata(&fep->pdev->dev);
 	unsigned char *iap, tmpaddr[ETH_ALEN];
-	int ret;
 
 	/*
 	 * try to get mac address in following order:
@@ -1702,9 +1701,9 @@ static void fec_get_mac(struct net_device *ndev)
 	if (!is_valid_ether_addr(iap)) {
 		struct device_node *np = fep->pdev->dev.of_node;
 		if (np) {
-			ret = of_get_mac_address(np, tmpaddr);
-			if (!ret)
-				iap = tmpaddr;
+			const char *mac = of_get_mac_address(np);
+			if (!IS_ERR(mac))
+				iap = (unsigned char *) mac;
 		}
 	}
 
