@@ -112,13 +112,6 @@ static void iint_init_always(struct integrity_iint_cache *iint,
 
 static void iint_free(struct integrity_iint_cache *iint)
 {
-#ifdef CONFIG_FIVE
-	kfree(iint->five_label);
-	iint->five_label = NULL;
-	iint->five_flags = 0UL;
-	iint->five_status = FIVE_FILE_UNKNOWN;
-	iint->five_signing = false;
-#endif
 	kfree(iint->ima_hash);
 	mutex_destroy(&iint->mutex);
 	kmem_cache_free(iint_cache, iint);
@@ -213,11 +206,6 @@ static void iint_init_once(void *foo)
 	struct integrity_iint_cache *iint = foo;
 
 	memset(iint, 0, sizeof(*iint));
-#ifdef CONFIG_FIVE
-	iint->five_flags = 0UL;
-	iint->five_status = FIVE_FILE_UNKNOWN;
-	iint->five_signing = false;
-#endif
 }
 
 static int __init integrity_iintcache_init(void)
